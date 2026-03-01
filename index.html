@@ -100,10 +100,10 @@ const MAX_FLICK   = 10;
 const FLICK_THRESH = 8;
 
 // Spawn — faster to build pressure
-const SPAWN_BASE    = 2000;  // starts reasonably fast
-const SPAWN_MIN     = 500;   // endgame: very fast
-const SPAWN_ACCEL   = 0.952; // escalates quickly
-const SPAWN_MULTI_AFTER = 20; // after N spawns, sometimes drop 2 at once
+const SPAWN_BASE    = 1800;  // starts faster
+const SPAWN_MIN     = 380;   // endgame: very fast
+const SPAWN_ACCEL   = 0.942; // escalates more quickly
+const SPAWN_MULTI_AFTER = 15; // after N spawns, sometimes drop 2 at once
 
 // Auto-merge only when centres are within this factor of sum of radii
 const MERGE_DIST_FACTOR = 1.08;
@@ -128,7 +128,7 @@ let particles, popEffects, rafId;
 
 function init() {
   bubbles=[]; particles=[]; popEffects=[];
-  score=0; gameOver=false; spawnInterval=SPAWN_BASE; spawnCount=0;
+  score=0; gameOver=false; spawnInterval=SPAWN_BASE; spawnCount=0; sizeMultiplier=1.0;
   document.getElementById('gameover').style.display='none';
   document.getElementById('score').textContent=0;
   for(let i=0;i<3;i++) spawnBubble();
@@ -139,14 +139,16 @@ function init() {
 }
 
 let spawnCount = 0;
+let sizeMultiplier = 1.0; // grows over time
 function scheduleSpawn() {
   spawnTimer = setTimeout(() => {
     if (!gameOver) {
       spawnCount++;
+      // Size grows every 6 spawns by 8%, max 2.2x
+      sizeMultiplier = Math.min(2.2, 1.0 + Math.floor(spawnCount / 6) * 0.08);
       spawnBubble();
-      // After 20 spawns, occasionally drop 2; after 40, sometimes 3
-      if (spawnCount > 40 && Math.random() < 0.4) spawnBubble();
-      else if (spawnCount > 20 && Math.random() < 0.35) spawnBubble();
+      if (spawnCount > 30 && Math.random() < 0.55) spawnBubble();
+      else if (spawnCount > 15 && Math.random() < 0.40) spawnBubble();
       spawnInterval = Math.max(SPAWN_MIN, spawnInterval * SPAWN_ACCEL);
       scheduleSpawn();
     }
@@ -156,12 +158,13 @@ function scheduleSpawn() {
 function spawnBubble() {
   const level = Math.floor(Math.random() * 3);
   const f = LEVELS[level];
-  const x = WALL + f.r + Math.random()*(W - WALL*2 - f.r*2);
+  const scaledR = Math.round(f.r * sizeMultiplier);
+  const x = WALL + scaledR + Math.random()*(W - WALL*2 - scaledR*2);
   bubbles.push({
-    x, y: FLOOR_Y - f.r - 1,
+    x, y: FLOOR_Y - scaledR - 1,
     vx: (Math.random()-0.5)*0.6,
     vy: -(Math.random()*1.0+0.6),
-    r: f.r, level, hue: f.hue,
+    r: scaledR, level, hue: f.hue,
     merged: false,
     wobble: Math.random()*Math.PI*2,
     wSpeed: 0.018+Math.random()*0.012,
@@ -418,7 +421,15 @@ function drawSmileParticles() {
 // Web Audio context for pop sound
 let audioCtx = null;
 function getAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    // Pre-warm: play a silent buffer to fully unlock audio on iOS/Chrome
+    const buf = audioCtx.createBuffer(1, 1, 22050);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    src.start(0);
+  }
   if (audioCtx.state === 'suspended') audioCtx.resume();
   return audioCtx;
 }
@@ -631,6 +642,51 @@ function drawBg() {
   // walls
   ctx.fillStyle='rgba(180,210,240,0.15)';
   ctx.fillRect(0,0,WALL,H); ctx.fillRect(W-WALL,0,WALL,H); ctx.fillRect(0,H-WALL,W,WALL);
+
+  // Danger flash — only when bubble is truly stuck near danger line
+  const dangerBubbles = bubbles.filter(b =>
+    b.y + b.r > GAMEOVER_Y - 20 && b.age > 60 && Math.abs(b.vy) < 0.8
+  );
+  if (dangerBubbles.length > 0) {
+    const pulse = (Math.sin(Date.now() / 200) + 1) / 2;
+    const intensity = Math.min(0.5, dangerBubbles.length * 0.15) * (0.4 + pulse * 0.6);
+    const t = Date.now() / 1000;
+
+    // Unicorn gradient vignette — cycles through pastel rainbow
+    const vig = ctx.createRadialGradient(W/2, H/2, H*0.28, W/2, H/2, H*0.88);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(0.7, 'rgba(0,0,0,0)');
+    // Rotating hue on the edge
+    const h1 = (t * 60) % 360;
+    const h2 = (t * 60 + 90) % 360;
+    const h3 = (t * 60 + 180) % 360;
+    const h4 = (t * 60 + 270) % 360;
+
+    // Draw 4 corner glows with different hues for unicorn feel
+    const corners = [
+      {x:0,   y:0,   h:h1},
+      {x:W,   y:0,   h:h2},
+      {x:W,   y:H,   h:h3},
+      {x:0,   y:H,   h:h4},
+    ];
+    for (const c of corners) {
+      const cg = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, H*0.7);
+      cg.addColorStop(0, `hsla(${c.h},100%,70%,${intensity})`);
+      cg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = cg;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Danger line flash — unicorn color
+    ctx.save();
+    ctx.globalAlpha = 0.35 + pulse * 0.45;
+    ctx.strokeStyle = `hsla(${h1},100%,72%,1)`;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6,4]);
+    ctx.beginPath(); ctx.moveTo(0, GAMEOVER_Y); ctx.lineTo(W, GAMEOVER_Y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
 }
 
 function render() {
@@ -768,6 +824,8 @@ function applySnap(startPos, endPos) {
 
 function onDown(cx,cy){
   if(gameOver) return;
+  // Unlock audio immediately on first touch
+  getAudio();
   const p=getPos(cx,cy);
   pointer={...p, startX:p.x, startY:p.y, px:p.x, py:p.y};
   snapUsed=false;
