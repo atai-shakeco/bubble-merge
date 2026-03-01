@@ -83,6 +83,7 @@ button:hover { background: rgba(120,170,220,0.5); color: #fff; }
   </div>
 </div>
 <p id="hint">フリックで泡を押す — 同じ色が隣接すると合体</p>
+<p id="diff-indicator" style="font-size:0.6rem;color:rgba(120,160,200,0.45);letter-spacing:2px;margin-top:3px;font-weight:300;">LEVEL <span id="diff-level">1</span></p>
 
 <script>
 const W = 340, H = 520;
@@ -100,10 +101,9 @@ const MAX_FLICK   = 10;
 const FLICK_THRESH = 8;
 
 // Spawn — faster to build pressure
-const SPAWN_BASE    = 1800;  // starts faster
-const SPAWN_MIN     = 380;   // endgame: very fast
-const SPAWN_ACCEL   = 0.942; // escalates more quickly
-const SPAWN_MULTI_AFTER = 15; // after N spawns, sometimes drop 2 at once
+const SPAWN_BASE    = 2200;  // start comfortable
+const SPAWN_MIN     = 280;   // endgame: very intense
+const SPAWN_ACCEL   = 0.960; // steady escalation
 
 // Auto-merge only when centres are within this factor of sum of radii
 const MERGE_DIST_FACTOR = 1.08;
@@ -124,11 +124,12 @@ canvas.width = W; canvas.height = H;
 const ctx = canvas.getContext('2d');
 
 let bubbles, score, gameOver, spawnTimer, spawnInterval;
+let gameTime=0, gameStartTime=0;
 let particles, popEffects, rafId;
 
 function init() {
   bubbles=[]; particles=[]; popEffects=[];
-  score=0; gameOver=false; spawnInterval=SPAWN_BASE; spawnCount=0; sizeMultiplier=1.0;
+  score=0; gameOver=false; spawnInterval=SPAWN_BASE; spawnCount=0; sizeMultiplier=1.0; gameTime=0; gameStartTime=Date.now();
   document.getElementById('gameover').style.display='none';
   document.getElementById('score').textContent=0;
   for(let i=0;i<3;i++) spawnBubble();
@@ -139,17 +140,33 @@ function init() {
 }
 
 let spawnCount = 0;
-let sizeMultiplier = 1.0; // grows over time
+let sizeMultiplier = 1.0;
+
+function getDifficultyLevel() {
+  // 0〜10 difficulty scale based on elapsed seconds
+  return Math.min(10, gameTime / 18); // max difficulty at 3 minutes
+}
+
 function scheduleSpawn() {
   spawnTimer = setTimeout(() => {
     if (!gameOver) {
       spawnCount++;
-      // Size grows every 6 spawns by 8%, max 2.2x
-      sizeMultiplier = Math.min(2.2, 1.0 + Math.floor(spawnCount / 6) * 0.08);
-      spawnBubble();
-      if (spawnCount > 30 && Math.random() < 0.55) spawnBubble();
-      else if (spawnCount > 15 && Math.random() < 0.40) spawnBubble();
+      const diff = getDifficultyLevel(); // 0〜10
+
+      // Size: 1.0x → 2.0x over time
+      sizeMultiplier = Math.min(2.0, 1.0 + diff * 0.10);
+
+      // Spawn interval: already handled by SPAWN_ACCEL
       spawnInterval = Math.max(SPAWN_MIN, spawnInterval * SPAWN_ACCEL);
+
+      // Always spawn 1
+      spawnBubble();
+
+      // Extra bubbles: gradually more likely and more frequent
+      if (diff > 2 && Math.random() < diff * 0.08) spawnBubble(); // 2nd
+      if (diff > 5 && Math.random() < (diff-5) * 0.10) spawnBubble(); // 3rd
+      if (diff > 8 && Math.random() < (diff-8) * 0.30) spawnBubble(); // 4th
+
       scheduleSpawn();
     }
   }, spawnInterval);
@@ -163,7 +180,7 @@ function spawnBubble() {
   bubbles.push({
     x, y: FLOOR_Y - scaledR - 1,
     vx: (Math.random()-0.5)*0.6,
-    vy: -(Math.random()*1.0+0.6),
+    vy: -(Math.random()*1.0+0.6 + getDifficultyLevel()*0.08),
     r: scaledR, level, hue: f.hue,
     merged: false,
     wobble: Math.random()*Math.PI*2,
@@ -706,10 +723,17 @@ function render() {
   }
   drawSmileParticles();
   for(const b of bubbles) drawBubble(b);
+
+  // Update difficulty display
+  const dl = document.getElementById('diff-level');
+  if (dl) dl.textContent = Math.floor(getDifficultyLevel()+1);
 }
 
 function loop() {
-  if(!gameOver) physics();
+  if(!gameOver) {
+    gameTime = (Date.now() - gameStartTime) / 1000; // seconds elapsed
+    physics();
+  }
   render();
   rafId=requestAnimationFrame(loop);
 }
