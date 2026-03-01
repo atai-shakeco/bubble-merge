@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>🫧 泡マージ</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; touch-action:none; }
+body {
+  background: linear-gradient(160deg, #f0f8ff 0%, #e8f4ff 40%, #f5f0ff 100%);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+h1 {
+  font-size: 1.5rem;
+  color: #88aacc;
+  letter-spacing: 5px;
+  font-weight: 200;
+  margin-bottom: 6px;
+}
+#scoreboard {
+  display: flex; gap: 28px;
+  margin-bottom: 10px;
+  font-size: 0.8rem;
+  color: #99bbcc;
+  letter-spacing: 3px;
+  font-weight: 300;
+}
+#game-area { position: relative; }
+canvas {
+  display: block;
+  border-radius: 20px;
+  border: 1px solid rgba(180,210,240,0.6);
+  box-shadow: 0 8px 40px rgba(100,150,200,0.15), 0 2px 8px rgba(100,150,200,0.1);
+}
+#gameover {
+  display: none;
+  position: absolute; inset: 0;
+  background: rgba(240,248,255,0.94);
+  border-radius: 20px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  backdrop-filter: blur(8px);
+}
+#gameover h2 { font-size: 1.6rem; color: #88aacc; font-weight: 200; letter-spacing: 5px; }
+#gameover p  { color: #aabccc; font-size: 0.9rem; letter-spacing: 2px; font-weight: 300; }
+button {
+  padding: 10px 32px;
+  background: linear-gradient(135deg, rgba(120,170,220,0.3), rgba(160,200,240,0.4));
+  border: 1px solid rgba(120,170,220,0.5);
+  border-radius: 50px;
+  font-size: 0.9rem;
+  color: #88aacc;
+  cursor: pointer;
+  letter-spacing: 3px;
+  font-weight: 300;
+  transition: all 0.2s;
+}
+button:hover { background: rgba(120,170,220,0.5); color: #fff; }
+#hint { margin-top: 8px; font-size: 0.65rem; color: rgba(120,160,200,0.5); letter-spacing: 1px; font-weight: 300; }
+</style>
+</head>
+<body>
+<h1>🫧 BUBBLE</h1>
+<div id="scoreboard">
+  <span>SCORE <span id="score">0</span></span>
+  <span>BEST <span id="best">0</span></span>
+</div>
+<div id="game-area">
+  <canvas id="c"></canvas>
+  <div id="gameover">
+    <h2>OVERFLOW</h2>
+    <p>SCORE : <span id="final-score">0</span></p>
+    <button onclick="restart()">もう一度</button>
+  </div>
+</div>
+<p id="hint">フリックで泡を押す — 同じ色が隣接すると合体</p>
+
+<script>
+const W = 340, H = 520;
+const WALL  = 10;
+const CEIL  = 8;
+const FLOOR_Y   = H - WALL;
+const GAMEOVER_Y = H - 35;
+
+// Physics — heavier, more resistant
+const GRAVITY   = -0.055;  // gentle upward
+const DAMPING   = 0.30;    // low bounce
+const FRICTION  = 0.94;    // air drag
+const FLICK_POWER = 0.18;  // weak flick — harder to control
+const MAX_FLICK   = 10;
+const FLICK_THRESH = 8;
+
+// Spawn — faster to build pressure
+const SPAWN_BASE    = 2000;  // starts reasonably fast
+const SPAWN_MIN     = 500;   // endgame: very fast
+const SPAWN_ACCEL   = 0.952; // escalates quickly
+const SPAWN_MULTI_AFTER = 20; // after N spawns, sometimes drop 2 at once
+
+// Auto-merge only when centres are within this factor of sum of radii
+const MERGE_DIST_FACTOR = 1.08;
+
+const LEVELS = [
+  { hue: 0,   r: 16, score: 1   },
+  { hue: 30,  r: 21, score: 3   },
+  { hue: 60,  r: 26, score: 7   },
+  { hue: 100, r: 32, score: 15  },
+  { hue: 170, r: 38, score: 30  },
+  { hue: 210, r: 45, score: 60  },
+  { hue: 260, r: 52, score: 120 },
+  { hue: 310, r: 60, score: 240 },
+];
+
+const canvas = document.getElementById('c');
+canvas.width = W; canvas.height = H;
+const ctx = canvas.getContext('2d');
+
+let bubbles, score, gameOver, spawnTimer, spawnInterval;
+let particles, popEffects, rafId;
+
+function init() {
+  bubbles=[]; particles=[]; popEffects=[];
+  score=0; gameOver=false; spawnInterval=SPAWN_BASE; spawnCount=0;
+  document.getElementById('gameover').style.display='none';
+  document.getElementById('score').textContent=0;
+  for(let i=0;i<3;i++) spawnBubble();
+  clearTimeout(spawnTimer);
+  scheduleSpawn();
+  cancelAnimationFrame(rafId);
+  loop();
+}
+
+let spawnCount = 0;
+function scheduleSpawn() {
+  spawnTimer = setTimeout(() => {
+    if (!gameOver) {
+      spawnCount++;
+      spawnBubble();
+      // After 20 spawns, occasionally drop 2; after 40, sometimes 3
+      if (spawnCount > 40 && Math.random() < 0.4) spawnBubble();
+      else if (spawnCount > 20 && Math.random() < 0.35) spawnBubble();
+      spawnInterval = Math.max(SPAWN_MIN, spawnInterval * SPAWN_ACCEL);
+      scheduleSpawn();
+    }
+  }, spawnInterval);
+}
+
+function spawnBubble() {
+  const level = Math.floor(Math.random() * 3);
+  const f = LEVELS[level];
+  const x = WALL + f.r + Math.random()*(W - WALL*2 - f.r*2);
+  bubbles.push({
+    x, y: FLOOR_Y - f.r - 1,
+    vx: (Math.random()-0.5)*0.6,
+    vy: -(Math.random()*1.0+0.6),
+    r: f.r, level, hue: f.hue,
+    merged: false,
+    wobble: Math.random()*Math.PI*2,
+    wSpeed: 0.018+Math.random()*0.012,
+    age: 0, scale: 1,
+  });
+}
+
+// ---- PHYSICS ----
+function physics() {
+  // 1. Move all bubbles
+  for (const b of bubbles) {
+    b.wobble += b.wSpeed;
+    b.age++;
+    b.vy += GRAVITY;
+    b.vx *= FRICTION;
+    b.vy *= FRICTION;
+    b.x  += b.vx + Math.sin(b.wobble)*0.18;
+    b.y  += b.vy;
+    if (b.y - b.r < CEIL)    { b.y = CEIL+b.r;    b.vy = Math.abs(b.vy)*DAMPING; b.vx*=0.88; }
+    if (b.y + b.r > FLOOR_Y) { b.y = FLOOR_Y-b.r; b.vy = -(Math.abs(b.vy)*DAMPING+0.1); }
+    if (b.x - b.r < WALL)    { b.x = WALL+b.r;    b.vx =  Math.abs(b.vx)*DAMPING; }
+    if (b.x + b.r > W-WALL)  { b.x = W-WALL-b.r;  b.vx = -Math.abs(b.vx)*DAMPING; }
+    if (b.scale < 1) b.scale = Math.min(1, b.scale+0.07);
+  }
+
+  // 2. Collision detection — collect merges, push apart non-merging
+  const toMerge = []; // [{a,b}]
+  const merging = new Set();
+  for (let i=0; i<bubbles.length; i++) {
+    for (let j=i+1; j<bubbles.length; j++) {
+      const a=bubbles[i], b=bubbles[j];
+      if (merging.has(a)||merging.has(b)) continue;
+      const dx=b.x-a.x, dy=b.y-a.y;
+      const dist=Math.sqrt(dx*dx+dy*dy);
+      const sumR=a.r+b.r;
+      if (dist>=sumR||dist<0.01) continue;
+
+      if (a.level===b.level && a.level<LEVELS.length-1 && dist<sumR*MERGE_DIST_FACTOR) {
+        // Start merge timer if not already
+        if (!a.mergeWith) { a.mergeWith=b; a.mergeTimer=0; }
+        // Pull together gently while waiting
+        const pull = 0.12;
+        const nx2=dx/dist, ny2=dy/dist;
+        a.vx+=nx2*pull; a.vy+=ny2*pull;
+        b.vx-=nx2*pull; b.vy-=ny2*pull;
+        // Pulse scale for both
+        a.pulseT=(a.pulseT||0)+0.18;
+        b.pulseT=(b.pulseT||0)+0.18;
+        a.mergeTimer=(a.mergeTimer||0)+1;
+        if (a.mergeTimer > 28) { // ~0.5s at 60fps
+          toMerge.push({a,b,mx:(a.x+b.x)/2,my:(a.y+b.y)/2,
+            vx:(a.vx+b.vx)*0.25,vy:(a.vy+b.vy)*0.25,hue:a.hue,level:a.level});
+          merging.add(a); merging.add(b);
+        }
+        continue;
+      } else if (a.mergeWith===b) {
+        // They drifted apart — reset
+        a.mergeWith=null; a.mergeTimer=0; a.pulseT=0;
+      }
+
+      // push apart
+      const nx=dx/dist, ny=dy/dist;
+      const ov=(sumR-dist)*0.5;
+      a.x-=nx*ov; a.y-=ny*ov;
+      b.x+=nx*ov; b.y+=ny*ov;
+      const dv=(a.vx-b.vx)*nx+(a.vy-b.vy)*ny;
+      if (dv>0) {
+        const imp=dv*0.42;
+        a.vx-=imp*nx; a.vy-=imp*ny;
+        b.vx+=imp*nx; b.vy+=imp*ny;
+      }
+    }
+  }
+
+  // 3. Remove merging bubbles
+  if (merging.size>0) bubbles=bubbles.filter(b=>!merging.has(b));
+
+  // 4. Spawn merged bubbles
+  for (const m of toMerge) {
+    const nl=Math.min(m.level+1,LEVELS.length-1);
+    const f=LEVELS[nl];
+    const isMax = nl >= LEVELS.length-1;
+    boom(m.mx,m.my,m.hue, isMax);
+    if (isMax) {
+      // Max bubble: spawn smile explosion then disappear
+      spawnSmileBurst(m.mx, m.my, m.hue);
+      score += f.score;
+      document.getElementById('score').textContent=score;
+      const best=parseInt(localStorage.getItem('bb3')||'0');
+      if(score>best){localStorage.setItem('bb3',score);document.getElementById('best').textContent=score;}
+      continue;
+    }
+    bubbles.push({
+      x:m.mx, y:m.my,
+      vx:m.vx+(Math.random()-0.5),
+      vy:Math.min(m.vy-0.5,-0.3),
+      r:f.r, level:nl, hue:f.hue,
+      merged:false,
+      wobble:Math.random()*Math.PI*2,
+      wSpeed:0.018+Math.random()*0.012,
+      age:0, scale:0.3,
+    });
+    score+=f.score;
+    document.getElementById('score').textContent=score;
+    const best=parseInt(localStorage.getItem('bb3')||'0');
+    if(score>best){localStorage.setItem('bb3',score);document.getElementById('best').textContent=score;}
+  }
+
+  // 5. Particles & effects
+  updateSmileParticles();
+  for (const p of particles) {
+    p.x+=p.vx; p.y+=p.vy;
+    p.vx*=0.96; p.vy*=0.96;
+    p.vy-=0.03;
+    p.life-=p.decay;
+    p.r*=0.98;
+  }
+  particles=particles.filter(p=>p.life>0&&p.r>0.3);
+  for (const e of popEffects) { e.r+=e.spd; e.life-=0.04; e.lw*=0.97; }
+  popEffects=popEffects.filter(e=>e.life>0);
+
+  // 6. Game over check
+  if (!gameOver) {
+    for (const b of bubbles) {
+      if (b.y+b.r>GAMEOVER_Y && Math.abs(b.vy)<0.5 && b.age>90) {
+        triggerGameOver(); break;
+      }
+    }
+  }
+}
+
+// ---- SMILE BURST for max bubble ----
+const smileParticles = [];
+
+function spawnSmileBurst(x, y, hue) {
+  // Smile bubble: grow → show face → instant pop
+  smileParticles.push({
+    x, y, hue,
+    r: 8,
+    maxR: 90,
+    life: 1.0,
+    phase: 'grow',
+  });
+
+  // 12-direction jets — explosive speed, fills entire screen
+  for (let i=0; i<12; i++) {
+    const angle = (i/12)*Math.PI*2;
+    const spd = 28 + Math.random()*22; // very fast = reaches edges
+    const h = (hue + i*30) % 360;
+    // Main jet droplet
+    particles.push({
+      x, y,
+      vx: Math.cos(angle)*spd,
+      vy: Math.sin(angle)*spd - 3,
+      life: 1.0, decay: 0.005, // very slow decay = travels to screen edge
+      r: 7 + Math.random()*6,
+      color: `hsla(${h},100%,78%,1)`,
+    });
+    // Wide-angle mist cloud per jet
+    for (let j=0; j<6; j++) {
+      const jitter = (Math.random()-0.5)*Math.PI*0.35;
+      const mspd = spd*(0.3+Math.random()*0.5);
+      particles.push({
+        x, y,
+        vx: Math.cos(angle+jitter)*mspd,
+        vy: Math.sin(angle+jitter)*mspd - 1.5,
+        life: 0.95, decay: 0.004, // lingers while spreading
+        r: 3 + Math.random()*5,
+        color: `hsla(${(h+40)%360},90%,84%,1)`,
+      });
+    }
+  }
+  // Big expanding rings
+  popEffects.push({x,y,r:12,life:1.0,spd:11,lw:7,color:`hsla(${hue},90%,75%,1)`});
+  popEffects.push({x,y,r:7, life:0.9,spd:7, lw:5,color:`hsla(${(hue+60)%360},95%,80%,1)`});
+  popEffects.push({x,y,r:4, life:0.8,spd:4, lw:3,color:`hsla(${(hue+120)%360},90%,85%,1)`});
+}
+
+function updateSmileParticles() {
+  for (const s of smileParticles) {
+    if (s.phase==='grow') {
+      s.r += (s.maxR - s.r) * 0.12;
+      if (s.r > s.maxR * 0.92) s.phase = 'hold';
+    } else if (s.phase==='hold') {
+      s.holdTimer = (s.holdTimer||0) + 1;
+      if (s.holdTimer > 12) s.phase = 'fade';
+    } else {
+      s.life -= 0.18; // instant pop — very fast fade
+    }
+  }
+  smileParticles.splice(0, smileParticles.length,
+    ...smileParticles.filter(s => s.life > 0));
+}
+
+function drawSmileParticles() {
+  for (const s of smileParticles) {
+    const {x,y,r,hue,life} = s;
+    const alpha = s.phase==='fade' ? life : 1.0;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Bubble body
+    const base = ctx.createRadialGradient(x-r*0.2,y-r*0.25,r*0.05,x,y,r);
+    base.addColorStop(0, `hsla(${hue},80%,95%,0.50)`);
+    base.addColorStop(0.6,`hsla(${(hue+60)%360},85%,80%,0.28)`);
+    base.addColorStop(1,  `hsla(${(hue+120)%360},90%,65%,0.42)`);
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.fillStyle=base; ctx.fill();
+
+    // Rim
+    ctx.strokeStyle=`hsla(${hue},90%,80%,0.65)`;
+    ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+
+    // Glass highlight
+    ctx.fillStyle='rgba(255,255,255,0.72)';
+    ctx.beginPath();
+    ctx.ellipse(x-r*0.12,y-r*0.50,r*0.28,r*0.09,-0.2,0,Math.PI*2);
+    ctx.fill();
+
+    // ── Foggy glass smiley — simple lines, slightly wobbly ──
+    const faceAlpha = Math.min(1, Math.max(0, (r/s.maxR - 0.25) * 2.8));
+    if (faceAlpha > 0) {
+      ctx.save();
+      ctx.globalAlpha = alpha * faceAlpha * 0.48;
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.fillStyle   = 'rgba(255,255,255,0.95)';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // Left eye  — normalized: center(-0.25,-0.24) size(0.11w, 0.16h)
+      ctx.beginPath();
+      ctx.ellipse(x + r*-0.25, y + r*-0.24, r*0.072, r*0.104, 0, 0, Math.PI*2);
+      ctx.fill();
+
+      // Right eye — center(0.25,-0.24)
+      ctx.beginPath();
+      ctx.ellipse(x + r*0.25, y + r*-0.24, r*0.072, r*0.104, 0, 0, Math.PI*2);
+      ctx.fill();
+
+      // Mouth — s=0.63 scale of original (0.36cy, 1.0ra), guaranteed inside bubble
+      ctx.lineWidth = r * 0.104;
+      ctx.beginPath();
+      ctx.arc(x, y + r*-0.255, r*0.630, 0.08*Math.PI, 0.92*Math.PI);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+}
+
+// Web Audio context for pop sound
+let audioCtx = null;
+function getAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+function playPop(hue, isMax=false) {
+  try {
+    const ac = getAudio();
+    const now = ac.currentTime;
+
+    // 432Hz-based pentatonic scale — healing frequencies
+    const scale = [432, 486, 540, 648, 720, 864, 972, 1080];
+    const idx = Math.floor(hue / 360 * scale.length) % scale.length;
+    // isMax = level 8: crystal-high shriek, then long ring
+    const freq = isMax ? 2160 : scale[idx];
+    const dur  = isMax ? 10.0 : 6.0;  // 6s normal, 10s max
+    const vol  = isMax ? 0.18 : 0.14;
+
+    // Singing bowl = pure fundamental + warm odd harmonics
+    const harmonics = [1, 2.756, 5.404]; // bowl overtone ratios
+    const harmVols  = [1.0, 0.18, 0.07];
+
+    const master = ac.createGain();
+    master.gain.value = vol;
+
+    // Soft reverb via two feedback delays
+    const dly1 = ac.createDelay(0.5); dly1.delayTime.value = 0.034;
+    const dly2 = ac.createDelay(0.5); dly2.delayTime.value = 0.071;
+    const dlyG1 = ac.createGain(); dlyG1.gain.value = 0.38;
+    const dlyG2 = ac.createGain(); dlyG2.gain.value = 0.26;
+    master.connect(dly1); dly1.connect(dlyG1); dlyG1.connect(ac.destination);
+    master.connect(dly2); dly2.connect(dlyG2); dlyG2.connect(ac.destination);
+    master.connect(ac.destination);
+
+    harmonics.forEach((ratio, i) => {
+      const osc = ac.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq * ratio;
+
+      const g = ac.createGain();
+      // Attack: instant strike then bell-curve decay
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(harmVols[i], now + 0.004);
+      g.gain.exponentialRampToValueAtTime(harmVols[i] * 0.6, now + 0.08);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + dur * (1 - i*0.25));
+
+      osc.connect(g); g.connect(master);
+      osc.start(now); osc.stop(now + dur + 0.2);
+    });
+
+    // Strike transient — tiny filtered noise click
+    const bufLen = Math.floor(ac.sampleRate * 0.025);
+    const buf = ac.createBuffer(1, bufLen, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i=0; i<bufLen; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/bufLen,4);
+    const ns = ac.createBufferSource(); ns.buffer = buf;
+    const bpf = ac.createBiquadFilter(); bpf.type='bandpass';
+    bpf.frequency.value = freq * 1.8; bpf.Q.value = 6;
+    const ng = ac.createGain(); ng.gain.value = vol * 0.5;
+    ns.connect(bpf); bpf.connect(ng); ng.connect(ac.destination);
+    ns.start(now); ns.stop(now + 0.03);
+
+  } catch(e) { console.log('audio err',e); }
+}
+
+function boom(x,y,hue,isMax=false) {
+  playPop(hue, isMax);
+
+  const bigR = LEVELS[Math.min(isMax ? LEVELS.length-1 : 0, LEVELS.length-1)].r;
+
+  // Juicy squirt: fast directional jets in 8 directions
+  for (let i=0;i<8;i++) {
+    const a = (i/8)*Math.PI*2;
+    const spd = 4.5 + Math.random()*3.5;
+    const h=(hue+i*12+360)%360;
+    // Main jet droplet
+    particles.push({x,y,
+      vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-1.2,
+      life:1, decay:0.022,
+      r:4+Math.random()*4,
+      color:`hsla(${h},90%,78%,1)`});
+    // Trailing mist
+    for (let j=0;j<3;j++) {
+      particles.push({x,y,
+        vx:Math.cos(a)*(spd*0.4+Math.random()*2)+(Math.random()-0.5),
+        vy:Math.sin(a)*(spd*0.4+Math.random()*2)-0.6,
+        life:0.8, decay:0.032,
+        r:1.5+Math.random()*2.5,
+        color:`hsla(${h},85%,82%,1)`});
+    }
+  }
+
+  // Thick juicy ring — expands fast then fades
+  popEffects.push({x,y,r:8,life:1.0,spd:5.5,lw:5,color:`hsla(${hue},85%,72%,1)`});
+  popEffects.push({x,y,r:4,life:0.9,spd:3.5,lw:3,color:`hsla(${(hue+40)%360},90%,80%,1)`});
+  setTimeout(()=>{ if(!gameOver) {
+    popEffects.push({x,y,r:2,life:0.7,spd:2,lw:2,color:`hsla(${(hue+120)%360},80%,85%,1)`});
+  }},60);
+}
+
+// ---- DRAW ----
+function drawBubble(b) {
+  const {x,y,r,hue,scale}=b;
+  const t=Date.now()/2200;
+  ctx.save();
+  const pulseScale = b.pulseT ? 1 + Math.sin(b.pulseT)*0.045 : 1;
+  const totalScale = scale * pulseScale;
+  if(totalScale !== 1){ ctx.translate(x,y); ctx.scale(totalScale,totalScale); ctx.translate(-x,-y); }
+
+  // 0. Colored shadow for depth
+  ctx.shadowColor = `hsla(${hue},70%,60%,0.25)`;
+  ctx.shadowBlur  = r * 1.0;
+  ctx.shadowOffsetY = r * 0.12;
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle='rgba(0,0,0,0)'; ctx.fill();
+  ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+
+  // 1. Base tinted body (NO clip — use arc fill only)
+  const base=ctx.createRadialGradient(x,y+r*0.2,r*0.05,x,y,r);
+  base.addColorStop(0,   `hsla(${hue},65%,93%,0.50)`);
+  base.addColorStop(0.5, `hsla(${(hue+30)%360},70%,82%,0.35)`);
+  base.addColorStop(1,   `hsla(${(hue+60)%360},75%,68%,0.52)`);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=base; ctx.fill();
+
+  // 2. Iridescent swirl (arc fill, no clip)
+  const swirl=ctx.createRadialGradient(
+    x+Math.cos(t)*r*0.6, y+Math.sin(t)*r*0.6, r*0.1,
+    x, y, r
+  );
+  swirl.addColorStop(0,   `hsla(${(hue+t*25)%360},100%,85%,0.22)`);
+  swirl.addColorStop(0.4, `hsla(${(hue+120+t*25)%360},100%,88%,0.16)`);
+  swirl.addColorStop(0.8, `hsla(${(hue+240+t*25)%360},100%,85%,0.20)`);
+  swirl.addColorStop(1,   `hsla(${hue},80%,75%,0.0)`);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=swirl; ctx.fill();
+
+  // 3. iPhone glass highlight — top radial (arc fill)
+  const glass=ctx.createRadialGradient(x-r*0.15,y-r*0.5,r*0.02,x,y,r);
+  glass.addColorStop(0,   'rgba(255,255,255,0.65)');
+  glass.addColorStop(0.3, 'rgba(255,255,255,0.20)');
+  glass.addColorStop(0.6, 'rgba(255,255,255,0.04)');
+  glass.addColorStop(1,   'rgba(255,255,255,0.0)');
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=glass; ctx.fill();
+
+  // 4. Bottom bounce light (arc fill)
+  const bot=ctx.createRadialGradient(x,y+r*0.55,r*0.05,x,y+r*0.1,r*0.85);
+  bot.addColorStop(0,   `hsla(${(hue+20)%360},90%,96%,0.28)`);
+  bot.addColorStop(1,   'rgba(255,255,255,0.0)');
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=bot; ctx.fill();
+
+  // 5. Colored rim stroke
+  const rimGrad=ctx.createLinearGradient(x-r,y-r,x+r,y+r);
+  rimGrad.addColorStop(0,   `hsla(${hue},90%,82%,0.9)`);
+  rimGrad.addColorStop(0.4, `hsla(${(hue+120)%360},90%,86%,0.6)`);
+  rimGrad.addColorStop(0.7, `hsla(${(hue+240)%360},90%,82%,0.7)`);
+  rimGrad.addColorStop(1,   `hsla(${hue},90%,82%,0.9)`);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.strokeStyle=rimGrad; ctx.lineWidth=2.0; ctx.stroke();
+
+  // 6. Pill specular highlight (ellipse, no clip needed)
+  ctx.fillStyle='rgba(255,255,255,0.88)';
+  ctx.beginPath();
+  ctx.ellipse(x-r*0.1, y-r*0.50, r*0.26, r*0.09, -0.2, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,0.55)';
+  ctx.beginPath();
+  ctx.ellipse(x+r*0.22, y-r*0.36, r*0.08, r*0.045, 0.5, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawBg() {
+  // white-ish gradient bg
+  const bg=ctx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#f2f8ff');
+  bg.addColorStop(1,'#eef2ff');
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+
+  // subtle light rays from top
+  ctx.save();
+  ctx.globalAlpha=0.04;
+  for(let i=0;i<5;i++){
+    const cx=W*0.1+i*(W*0.22);
+    const grd=ctx.createRadialGradient(cx,0,0,cx,0,H*0.9);
+    grd.addColorStop(0,'rgba(100,180,255,1)');
+    grd.addColorStop(1,'rgba(100,180,255,0)');
+    ctx.fillStyle=grd;
+    ctx.beginPath(); ctx.moveTo(cx-30,0); ctx.lineTo(cx+30,0); ctx.lineTo(cx+120,H); ctx.lineTo(cx-120,H); ctx.fill();
+  }
+  ctx.restore();
+
+  // danger zone
+  const dg=ctx.createLinearGradient(0,GAMEOVER_Y-40,0,FLOOR_Y);
+  dg.addColorStop(0,'rgba(255,100,100,0)');
+  dg.addColorStop(1,'rgba(255,100,100,0.08)');
+  ctx.fillStyle=dg; ctx.fillRect(0,GAMEOVER_Y-40,W,FLOOR_Y-(GAMEOVER_Y-40));
+
+  ctx.save();
+  ctx.strokeStyle='rgba(220,100,100,0.3)';
+  ctx.lineWidth=1; ctx.setLineDash([6,5]);
+  ctx.beginPath(); ctx.moveTo(0,GAMEOVER_Y); ctx.lineTo(W,GAMEOVER_Y); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(200,100,100,0.4)';
+  ctx.font='300 9px Helvetica Neue,Arial'; ctx.textAlign='right';
+  ctx.fillText('DANGER',W-12,GAMEOVER_Y-4);
+  ctx.restore();
+
+  // walls
+  ctx.fillStyle='rgba(180,210,240,0.15)';
+  ctx.fillRect(0,0,WALL,H); ctx.fillRect(W-WALL,0,WALL,H); ctx.fillRect(0,H-WALL,W,WALL);
+}
+
+function render() {
+  drawBg();
+
+  for(const e of popEffects){
+    ctx.save(); ctx.globalAlpha=e.life*0.5;
+    ctx.strokeStyle=e.color; ctx.lineWidth=e.lw;
+    ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
+  for(const p of particles){
+    ctx.save(); ctx.globalAlpha=p.life*0.8;
+    ctx.fillStyle=p.color;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+  drawSmileParticles();
+  for(const b of bubbles) drawBubble(b);
+}
+
+function loop() {
+  if(!gameOver) physics();
+  render();
+  rafId=requestAnimationFrame(loop);
+}
+
+function triggerGameOver() {
+  if(gameOver) return;
+  gameOver=true;
+  clearTimeout(spawnTimer);
+  document.getElementById('final-score').textContent=score;
+  document.getElementById('gameover').style.display='flex';
+}
+
+function restart(){init();}
+
+// ---- INPUT: snap flick + breath drag ----
+let pointer = null;
+let snapUsed = false; // one strong snap per press
+
+function getPos(cx,cy){
+  const rect=canvas.getBoundingClientRect();
+  return{x:(cx-rect.left)*(W/rect.width),y:(cy-rect.top)*(H/rect.height)};
+}
+
+// Slippery bubble touch: pointer drags bubbles like wet glass
+let stickyBubble = null; // bubble currently "held"
+
+function applyBreath(pos, prev) {
+  if (!prev) return;
+  const dx=pos.x-prev.x, dy=pos.y-prev.y;
+  const speed=Math.sqrt(dx*dx+dy*dy);
+  const nx=speed>0.1?dx/speed:0, ny=speed>0.1?dy/speed:0;
+
+  for (const b of bubbles) {
+    const dist=Math.hypot(b.x-pos.x, b.y-pos.y);
+
+    // Inside bubble: slippery — bubble squirts away from finger
+    if (dist < b.r * 1.05) {
+      // Push away from pointer center (escape force)
+      const escapeDir = dist > 0.5 ? 1 : 0;
+      const ex = escapeDir ? (b.x - pos.x)/dist : 0;
+      const ey = escapeDir ? (b.y - pos.y)/dist : 0;
+      const escapePow = (1 - dist/b.r) * 1.8;
+      b.vx += ex * escapePow + dx * 0.22;
+      b.vy += ey * escapePow + dy * 0.22;
+      // Tiny surface shimmer particles
+      if (Math.random() < 0.25) {
+        const angle = Math.random()*Math.PI*2;
+        particles.push({
+          x: b.x + Math.cos(angle)*b.r*0.85,
+          y: b.y + Math.sin(angle)*b.r*0.85,
+          vx: Math.cos(angle)*0.4 + nx*0.3,
+          vy: Math.sin(angle)*0.4 + ny*0.3 - 0.2,
+          life:0.5, decay:0.05, r:1.2+Math.random()*1.8,
+          color:`hsla(${b.hue},70%,90%,1)`,
+        });
+      }
+    }
+    // Near bubble: air pressure falloff
+    else if (dist < b.r * 3.2 && speed > 0.3) {
+      const falloff = Math.pow(1-(dist-b.r)/(b.r*2.2), 1.5);
+      const force = Math.min(speed*0.06, 1.4)*falloff;
+      b.vx+=nx*force; b.vy+=ny*force;
+    }
+  }
+}
+
+// Snap: find closest bubble, apply sharp directional impulse
+function applySnap(startPos, endPos) {
+  const dx=endPos.x-startPos.x, dy=endPos.y-startPos.y;
+  const dist=Math.sqrt(dx*dx+dy*dy);
+  if (dist < 6) return;
+  const nx=dx/dist, ny=dy/dist;
+
+  // Find bubble nearest to drag start
+  let hit=null, hd=Infinity;
+  for (const b of bubbles) {
+    const d=Math.hypot(b.x-startPos.x, b.y-startPos.y);
+    if (d < hd) { hit=b; hd=d; }
+  }
+  if (!hit) return;
+
+  // Floaty snap — softer impulse, affects nearby bubbles too
+  const power = Math.min(dist * 0.10, 4.2);
+  hit.vx += nx * power;
+  hit.vy += ny * power;
+  // Slight nudge to bubbles nearby for ripple feel
+  for (const b of bubbles) {
+    if (b === hit) continue;
+    const dd = Math.hypot(b.x-hit.x, b.y-hit.y);
+    if (dd < hit.r * 3.5) {
+      const ripple = (1 - dd/(hit.r*3.5)) * power * 0.25;
+      b.vx += nx * ripple;
+      b.vy += ny * ripple;
+    }
+  }
+
+  // Soft floating trail
+  for (let i=0; i<14; i++) {
+    const t=i/14;
+    const angle = Math.atan2(-ny,-nx) + (Math.random()-0.5)*1.0;
+    particles.push({
+      x:hit.x + (Math.random()-0.5)*hit.r*0.6,
+      y:hit.y + (Math.random()-0.5)*hit.r*0.6,
+      vx:Math.cos(angle)*(Math.random()*1.2+0.3),
+      vy:Math.sin(angle)*(Math.random()*1.2+0.3) - 0.5,
+      life:0.6+t*0.35, decay:0.018,
+      r:1.5+t*4,
+      color:`hsla(${hit.hue},75%,82%,1)`,
+    });
+  }
+}
+
+function onDown(cx,cy){
+  if(gameOver) return;
+  const p=getPos(cx,cy);
+  pointer={...p, startX:p.x, startY:p.y, px:p.x, py:p.y};
+  snapUsed=false;
+}
+function onMove(cx,cy){
+  if(!pointer||gameOver) return;
+  const p=getPos(cx,cy);
+  // First meaningful move: snap
+  if (!snapUsed) {
+    const dd=Math.hypot(p.x-pointer.startX, p.y-pointer.startY);
+    if (dd > 14) {
+      applySnap({x:pointer.startX,y:pointer.startY}, p);
+      snapUsed=true;
+    }
+  }
+  // Continuous breath
+  applyBreath(p, {x:pointer.px,y:pointer.py});
+  pointer.px=pointer.x; pointer.py=pointer.y;
+  pointer.x=p.x; pointer.y=p.y;
+}
+function onUp(cx,cy){
+  if(!pointer||gameOver){pointer=null;return;}
+  pointer=null;
+}
+
+canvas.addEventListener('mousedown', e=>onDown(e.clientX,e.clientY));
+canvas.addEventListener('mousemove', e=>{ if(pointer) onMove(e.clientX,e.clientY); });
+canvas.addEventListener('mouseup',   e=>onUp(e.clientX,e.clientY));
+canvas.addEventListener('mouseleave',()=>{pointer=null;});
+canvas.addEventListener('touchstart',e=>{e.preventDefault();onDown(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
+canvas.addEventListener('touchmove', e=>{e.preventDefault();onMove(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
+canvas.addEventListener('touchend',  e=>{e.preventDefault();onUp(e.changedTouches[0].clientX,e.changedTouches[0].clientY);},{passive:false});
+document.getElementById('best').textContent=localStorage.getItem('bb3')||0;
+init();
+</script>
+</body>
+</html>
