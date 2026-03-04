@@ -732,22 +732,23 @@ function drawSmileParticles() {
 
 // Web Audio context for pop sound
 let audioCtx = null;
-let audioUnlocked = false;
 
 function unlockAudio() {
-  if (audioUnlocked) return;
-  // Must be called synchronously inside a user gesture
+  // Always create + resume — safe to call multiple times
   if (!audioCtx) {
     audioCtx = new (window.AudioContext||window.webkitAudioContext)();
   }
-  // Play silent buffer — this is the iOS unlock trick
-  const buf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
-  const src = audioCtx.createBufferSource();
-  src.buffer = buf;
-  src.connect(audioCtx.destination);
-  src.start(0);
-  src.onended = () => { audioUnlocked = true; };
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  // Play silent buffer to unlock iOS Safari
+  try {
+    const buf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    src.start(0);
+  } catch(e) {}
 }
 
 function getAudio() {
